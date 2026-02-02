@@ -7,7 +7,13 @@ Commodity Exchange (ICE.ir) API with intelligent incremental loading and SQL Ser
 
 Author: sadeghi.a
 Created: Sun Jan 25 17:08:08 2026
-Version: 2.0.0
+Version: 2.1.0 - Security Enhanced
+
+Security:
+    - NO hardcoded credentials (compliant with SonarQube S2115)
+    - Credentials loaded from environment variables
+    - Supports .env file for local development
+    - Validates configuration before execution
 
 Features:
     - Fetches historical currency data from ICE.ir API
@@ -29,12 +35,22 @@ Dependencies:
     - pyodbc: SQL Server ODBC driver
     - tenacity: Retry logic for robustness
     
+Configuration:
+    Create a .env file from .env.example:
+        cp .env.example .env
+        # Edit .env with your database credentials
+    
+    Required environment variables:
+        DB_SERVER, DB_NAME, DB_USER, DB_PASSWORD
+    Or:
+        DB_CONNECTION_STRING
+    
 Usage:
     python AutoTrowel_Documented.py
     
     Or programmatically:
     >>> from AutoTrowel_Documented import CurrencyETL
-    >>> etl = CurrencyETL(connection_string="...")
+    >>> etl = CurrencyETL()
     >>> etl.run()
 """
 
@@ -58,6 +74,13 @@ from tenacity import (
     wait_exponential,
     retry_if_exception_type
 )
+
+# Import secure config module
+from config import get_connection_string, get_table_name, get_api_config, load_env_file
+
+
+# Load environment variables from .env file
+load_env_file()
 
 
 # Setup logging
@@ -158,9 +181,12 @@ class Config:
     """Configuration manager for AutoTrowel ETL pipeline."""
     
     BASE_URL = "https://api.ice.ir/api/v1/markets/{market}/currencies/history/{currency_id}/"
-    PAGE_SIZE = 1000
-    API_TIMEOUT = 30
-    MAX_RETRIES = 3
+    
+    # Get API config from environment
+    _api_config = get_api_config()
+    PAGE_SIZE = _api_config['page_size']
+    API_TIMEOUT = _api_config['timeout']
+    MAX_RETRIES = _api_config['max_retries']
     
     # Bill = physical banknotes, WireTransfer = electronic transfer
     CURRENCY_TYPES = {
@@ -202,25 +228,44 @@ class Config:
 class CurrencyETL:
     """Main ETL pipeline for currency data extraction and loading."""
     
-    def __init__(self, connection_string: Optional[str] = None, table_name: str = 'IceAssets'):
+    def __init__(self, connection_string: Optional[str] = None, table_name: Optional[str] = None):
         """
-        Initialize the ETL pipeline.
+        Initialize the ETL pipeline with secure credential management.
         
         Args:
-            connection_string: SQL Server connection string (or from env var)
-            table_name: Target database table name
-        """
-        self.connection_string = connection_string or os.getenv(
-            'DB_CONNECTION_STRING',
-            "mssql+pyodbc://user:pass@server/db?driver=ODBC+Driver+17+for+SQL+Server"
-        )
-        self.table_name = table_name
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
+            connection_string: SQL Server connection string (optional)
+                             If not provided, built from environment variables
+            table_name: Target database table name (optional)
+                       If not provided, read from environment or defaults to 'IceAssets'
         
-        logger.info(f"CurrencyETL initialized - Table: {table_name}")
+        Environment Variables Required (if connection_string not provided):
+            DB_SERVER, DB_NAME, DB_USER, DB_PASSWORD
+            Or: DB_CONNECTION_STRING
+            Optional: DB_TABLE_NAME
+        
+        Raises:
+            ValueError: If required environment variables are missing or invalid
+        """
+        try:
+            # Get connection string securely from environment
+            self.connection_string = connection_string or get_connection_string(prefix='DB')
+            
+            # Get table name from parameter, environment, or default
+            self.table_name = table_name or get_table_name(prefix='DB', default='IceAssets')
+            
+            # Initialize HTTP session
+            self.session = requests.Session()
+            self.session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            
+            logger.info(f"CurrencyETL initialized - Table: {self.table_name}")
+            logger.info("Configuration validated successfully")
+            
+        except ValueError as e:
+            logger.error(f"Configuration error: {e}")
+            logger.error("Please check your .env file or environment variables")
+            raise
     
     @staticmethod
     def clean_persian_number(text: Any) -> Optional[str]:
@@ -587,6 +632,10 @@ def incremental_load(connection_string: str, table_name: str = 'IceAssets') -> N
         connection_string: SQL Server connection string
         table_name: Target table name
     """
+    logger.warning(
+        "incremental_load() is deprecated. "
+        "Use CurrencyETL class with environment variables instead."
+    )
     etl = CurrencyETL(connection_string, table_name)
     success = etl.run()
     sys.exit(0 if success else 1)
@@ -595,16 +644,23 @@ def incremental_load(connection_string: str, table_name: str = 'IceAssets') -> N
 def main():
     """Main entry point."""
     try:
-        connection_string = os.getenv(
-            'DB_CONNECTION_STRING',
-            "mssql+pyodbc://user:pass@server/db?driver=ODBC+Driver+17+for+SQL+Server"
-        )
+        logger.info("Initializing AutoTrowel with secure configuration...")
         
-        etl = CurrencyETL(connection_string)
+        # Configuration is now handled by config.py
+        # No hardcoded credentials!
+        etl = CurrencyETL()
         success = etl.run()
         
         sys.exit(0 if success else 1)
         
+    except ValueError as e:
+        logger.error(f"Configuration error: {e}")
+        logger.error("")
+        logger.error("Setup instructions:")
+        logger.error("  1. Copy .env.example to .env")
+        logger.error("  2. Edit .env with your database credentials")
+        logger.error("  3. Run the script again")
+        sys.exit(1)
     except KeyboardInterrupt:
         print("\n⚠️  Operation cancelled by user")
         sys.exit(1)
