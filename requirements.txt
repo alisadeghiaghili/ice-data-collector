@@ -15,14 +15,14 @@ jdatetime>=3.6.0
 sqlalchemy>=1.4.0
 pyodbc>=4.0.30
 
+# Retry Logic and Error Handling
+tenacity>=8.0.0
+
 # Optional: For scheduling (uncomment if needed)
 # schedule>=1.1.0
 
 # Optional: For environment variables (uncomment if needed)
 # python-dotenv>=0.19.0
-
-# Optional: For retry logic (uncomment if needed)
-# tenacity>=8.0.0
 
 # Optional: For better logging (uncomment if needed)
 # loguru>=0.6.0
