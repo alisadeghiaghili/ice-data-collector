@@ -41,10 +41,8 @@ from datetime import datetime
 from sqlalchemy import create_engine, CHAR, NVARCHAR, BigInteger, DATETIME
 import re
 
-# ======================================================
-# JDate Adapter
-# ======================================================
 
+# JDate adapter for handling Persian dates
 class JDate:
     """
     Adapter class for handling Jalali (Persian) date conversions.
@@ -106,24 +104,23 @@ class JDate:
         if not self.value or self.value == 'null':
             return None
         
-        # Handle 8-digit string format (YYYYMMDD)
+        # 8-digit string format (YYYYMMDD)
         if isinstance(self.value, str) and self.value.isdigit() and len(self.value) == 8:
             jd = jdatetime.date(
                 int(self.value[0:4]),
                 int(self.value[4:6]),
                 int(self.value[6:8])
             )
-        # Handle ISO date string format (YYYY-MM-DD)
+        # ISO date string format (YYYY-MM-DD)
         elif isinstance(self.value, str) and '-' in self.value:
             g = datetime.strptime(self.value, "%Y-%m-%d")
             jd = jdatetime.date.fromgregorian(date=g)
-        # Handle datetime object
+        # datetime object
         elif isinstance(self.value, datetime):
             jd = jdatetime.date.fromgregorian(date=self.value)
         else:
             return None
         
-        # Convert custom format to strftime format
         return jd.strftime(
             fmt.replace('Y', '%Y')
                .replace('m', '%m')
@@ -131,18 +128,11 @@ class JDate:
         )
 
 
-# ======================================================
-# Configuration Constants
-# ======================================================
-
-# API endpoint template for currency history
+# Configuration
 BASE_URL = "https://api.ice.ir/api/v1/markets/{market}/currencies/history/{currency_id}/"
-
-# Number of records to fetch per API call (matches API maximum)
 PAGE_SIZE = 1000
 
-# Mapping of currency IDs to their transaction types
-# Bill = Physical banknotes, WireTransfer = Electronic transfer
+# Bill = physical banknotes, WireTransfer = electronic transfer
 CURRENCY_TYPES = {
     14: 'Bill', 15: 'WireTransfer',      # USD
     18: 'Bill', 19: 'WireTransfer',      # AED
@@ -154,13 +144,12 @@ CURRENCY_TYPES = {
     71: 'Bill', 72: 'WireTransfer',      # INR
 }
 
-# Persian translations for currency types
 CURRENCY_TYPE_FA = {
     'Bill': 'اسکناس',
     'WireTransfer': 'حواله'
 }
 
-# Master currency metadata - source of truth for currency identification
+# Currency metadata mapping
 CURRENCY_META = {
     14: {'symbol': 'USD', 'name': 'دلار آمریکا'},
     15: {'symbol': 'USD', 'name': 'دلار آمریکا'},
@@ -181,10 +170,7 @@ CURRENCY_META = {
 }
 
 
-# ======================================================
-# Helper Functions
-# ======================================================
-
+# Helper functions
 def clean_persian_number(text):
     """
     Convert Persian/Farsi digits to English digits and remove non-numeric characters.
@@ -211,11 +197,8 @@ def clean_persian_number(text):
     if not text:
         return None
     
-    # Create translation table for Persian to English digits
     trans = str.maketrans('۰۱۲۳۴۵۶۷۸۹', '0123456789')
     text = text.translate(trans)
-    
-    # Remove all non-digit characters
     return re.sub(r'[^\d]', '', text) or None
 
 
@@ -241,10 +224,7 @@ def correct_date_format(jalali_date):
     return f"{jalali_date[:4]}-{jalali_date[4:6]}-{jalali_date[6:8]}"
 
 
-# ======================================================
-# URL Builder
-# ======================================================
-
+# URL builder
 def build_currency_urls():
     """
     Generate list of API endpoint URLs for all configured currencies.
@@ -270,23 +250,16 @@ def build_currency_urls():
     """
     urls = []
     for currency_id, ctype in CURRENCY_TYPES.items():
-        # Market 1 = Bill (physical), Market 2 = WireTransfer (electronic)
         market = 1 if ctype == 'Bill' else 2
         urls.append({
             'currency_id': currency_id,
             'ctype': ctype,
-            'url': BASE_URL.format(
-                market=market,
-                currency_id=currency_id
-            )
+            'url': BASE_URL.format(market=market, currency_id=currency_id)
         })
     return urls
 
 
-# ======================================================
-# API Fetching with Pagination
-# ======================================================
-
+# API fetcher with pagination
 def fetch_currency_history(url):
     """
     Fetch complete currency history from ICE.ir API with automatic pagination.
@@ -322,37 +295,31 @@ def fetch_currency_history(url):
     
     while True:
         params = {
-            'lang': 'fa',          # Farsi language for response
-            'limit': PAGE_SIZE,    # Records per page
-            'offset': offset       # Starting position
+            'lang': 'fa',
+            'limit': PAGE_SIZE,
+            'offset': offset
         }
         
-        # Make API request with 20-second timeout
         r = requests.get(url, params=params, timeout=20)
-        r.raise_for_status()  # Raise exception for HTTP errors
+        r.raise_for_status()
         
         data = r.json()
         results = data.get('results', [])
         count = data.get('count', 0)
         
-        # Stop if no more results
         if not results:
             break
         
         all_results.extend(results)
         offset += PAGE_SIZE
         
-        # Stop if we've fetched all available records
         if offset >= count:
             break
     
     return all_results
 
 
-# ======================================================
-# Data Parser
-# ======================================================
-
+# Parser
 def parse_item(item, now, currency_id):
     """
     Parse a single API response item into standardized database record format.
@@ -394,7 +361,6 @@ def parse_item(item, now, currency_id):
         >>> record['SellPrice']
         28500
     """
-    # Get currency metadata
     meta = CURRENCY_META.get(currency_id)
     if not meta:
         return None
@@ -419,10 +385,7 @@ def parse_item(item, now, currency_id):
     }
 
 
-# ======================================================
-# Main Data Processor
-# ======================================================
-
+# Main processor
 def process_all_currency_data():
     """
     Fetch and process currency data for all configured currencies.
@@ -463,35 +426,29 @@ def process_all_currency_data():
     now = datetime.now()
     all_data = []
     
-    # Iterate through all configured currencies
     for meta in build_currency_urls():
         currency_id = meta['currency_id']
         print(f"Fetching currency_id={currency_id} ({meta['ctype']})")
         
-        # Fetch data from API
         items = fetch_currency_history(meta['url'])
         print(f"  -> {len(items)} records")
         
-        # Parse each item
         for item in items:
             parsed = parse_item(item, now, currency_id)
             if parsed:
                 all_data.append(parsed)
     
-    # Convert to DataFrame
     df = pd.DataFrame(all_data)
     
     if df.empty:
         return df
     
-    # Clean and format dates
     df['Date'] = (
         df['Date']
         .apply(clean_persian_number)
         .apply(correct_date_format)
     )
     
-    # Replace various null representations with None
     return df.replace([np.nan, "", "nan--"], None)
 
 
@@ -560,7 +517,6 @@ def find_new_records(df_new, df_existing_keys):
     df_new_keys = df_new[key_cols].copy()
     df_existing_keys = df_existing_keys[key_cols].copy()
     
-    # Left join to identify new records
     df_merged = df_new_keys.merge(
         df_existing_keys,
         on=key_cols,
@@ -568,15 +524,11 @@ def find_new_records(df_new, df_existing_keys):
         indicator=True
     )
     
-    # Filter for records not in existing database
     new_mask = df_merged['_merge'] == 'left_only'
     return df_new.loc[new_mask].copy()
 
 
-# ======================================================
-# Database Operations
-# ======================================================
-
+# Database operations
 def save_to_database(df, connection_string, table_name='IceAssets'):
     """
     Save DataFrame to SQL Server database with proper schema.
@@ -624,15 +576,14 @@ def save_to_database(df, connection_string, table_name='IceAssets'):
         print("No data to save")
         return
     
-    # Create database engine with fast_executemany for performance
     engine = create_engine(connection_string, fast_executemany=True)
     
     df.to_sql(
         table_name,
         engine,
-        if_exists='append',  # Append to existing table
+        if_exists='append',
         index=False,
-        chunksize=1000,      # Insert in batches of 1000
+        chunksize=1000,
         dtype={
             'Date': CHAR(10),
             'Name': NVARCHAR(100),
@@ -716,14 +667,6 @@ def incremental_load(connection_string, table_name='IceAssets'):
     save_to_database(df_delta, connection_string, table_name)
 
 
-# ======================================================
-# Script Entry Point
-# ======================================================
-
 if __name__ == "__main__":
-    # Connection string configuration
-    # Update with your actual database credentials
     CONNECTION_STRING = "mssql+pyodbc://user:pass@server/db?driver=ODBC+Driver+17+for+SQL+Server"
-    
-    # Run incremental load
     incremental_load(CONNECTION_STRING)
