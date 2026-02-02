@@ -649,7 +649,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🙏 Acknowledgments
 
-- Iran Commodity Exchange (ICE.ir) for providing the API
 - jdatetime library for Jalali date support
 - SQLAlchemy team for excellent ORM
 
