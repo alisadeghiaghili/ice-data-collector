@@ -1,25 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-Secure Configuration Module for AutoTrowel ETL Pipeline.
+Secure Configuration Module for ICE Data Collector.
 
 Provides secure credential management using environment variables.
-Compliant with SonarQube security rule python:S2115.
+Compatible with SQLAlchemy 2.0+ and supports both SQL authentication
+and Windows trusted connection.
 
 NO credentials should ever be hardcoded in this file.
 
 Usage:
-    from config import get_connection_string, load_env_file
+    from config import Config
     
-    load_env_file()  # Load from .env
-    conn_str = get_connection_string()
+    config = Config()
+    engine = config.create_engine()
 """
 
 import os
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 from urllib.parse import quote_plus
 from pathlib import Path
-
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -80,227 +81,345 @@ def validate_no_placeholders(value: str, var_name: str) -> None:
     Raises:
         ValueError: If placeholder detected
     """
-    placeholders = ['your_', 'example', 'placeholder', 'changeme', 'CHANGE_ME']
+    placeholders = ['your_', 'example', 'placeholder', 'changeme', 'change_me', 'path_to']
     
     if any(ph in value.lower() for ph in placeholders):
         raise ValueError(
             f"⚠️  Environment variable {var_name} contains placeholder value: '{value}'\n"
-            f"Please update your .env file with actual credentials.\n"
+            f"Please update your .env file with actual values.\n"
             f"See .env.example for template."
         )
 
 
-def get_connection_string(
-    prefix: str = 'DB',
-    connection_string_var: Optional[str] = None
-) -> str:
-    """
-    Build secure SQL Server connection string from environment variables.
+@dataclass
+class DatabaseConfig:
+    """Database connection configuration."""
+    server: str
+    database: str
+    driver: str = 'ODBC Driver 17 for SQL Server'
+    port: int = 1433
+    user: Optional[str] = None
+    password: Optional[str] = None
+    trusted_connection: bool = False
+    table_name: str = 'scraped'
+    connection_timeout: int = 30
     
-    Priority:
-        1. Explicit connection_string_var if provided
-        2. {prefix}_CONNECTION_STRING environment variable
-        3. Individual components: {prefix}_SERVER, {prefix}_NAME, etc.
+    def __post_init__(self):
+        """Validate configuration after initialization."""
+        if not self.trusted_connection and (not self.user or not self.password):
+            raise ValueError(
+                "Either set trusted_connection=True or provide user and password"
+            )
+        
+        # Validate no placeholders
+        validate_no_placeholders(self.server, 'server')
+        validate_no_placeholders(self.database, 'database')
     
-    Args:
-        prefix: Environment variable prefix (e.g., 'DB' or 'ICE_DB')
-        connection_string_var: Optional pre-built connection string
-    
-    Returns:
-        SQLAlchemy connection string
-    
-    Raises:
-        ValueError: If required configuration is missing or contains placeholders
-    
-    Environment Variables:
-        {PREFIX}_CONNECTION_STRING: Complete connection string (highest priority)
-        {PREFIX}_SERVER: Database server hostname  
-        {PREFIX}_NAME: Database name
-        {PREFIX}_USER: Database username
-        {PREFIX}_PASSWORD: Database password
-        {PREFIX}_DRIVER: ODBC driver (default: 'ODBC Driver 17 for SQL Server')
-        {PREFIX}_PORT: Database port (default: 1433)
-    
-    Examples:
-        >>> os.environ['DB_SERVER'] = 'localhost'
-        >>> os.environ['DB_NAME'] = 'mydb'
-        >>> os.environ['DB_USER'] = 'sa'
-        >>> os.environ['DB_PASSWORD'] = 'SecurePass123!'
-        >>> conn = get_connection_string()
-        >>> 'sa:SecurePass123' in conn  # Password is URL-encoded
-        True
-    """
-    # Check for explicit connection string parameter
-    if connection_string_var:
-        validate_no_placeholders(connection_string_var, 'connection_string')
-        logger.debug("Using provided connection string parameter")
-        return connection_string_var
-    
-    # Check for full connection string in environment
-    conn_str_env = os.getenv(f'{prefix}_CONNECTION_STRING')
-    if conn_str_env:
-        validate_no_placeholders(conn_str_env, f'{prefix}_CONNECTION_STRING')
-        logger.debug(f"Using {prefix}_CONNECTION_STRING from environment")
-        return conn_str_env
-    
-    # Build from individual components
-    server = os.getenv(f'{prefix}_SERVER')
-    database = os.getenv(f'{prefix}_NAME')
-    user = os.getenv(f'{prefix}_USER')
-    password = os.getenv(f'{prefix}_PASSWORD')
-    driver = os.getenv(f'{prefix}_DRIVER', 'ODBC Driver 17 for SQL Server')
-    port = os.getenv(f'{prefix}_PORT', '1433')
-    
-    # Check for missing required variables
-    missing = []
-    if not server:
-        missing.append(f'{prefix}_SERVER')
-    if not database:
-        missing.append(f'{prefix}_NAME')
-    if not user:
-        missing.append(f'{prefix}_USER')
-    if not password:
-        missing.append(f'{prefix}_PASSWORD')
-    
-    if missing:
-        raise ValueError(
-            f"❌ Missing required environment variables: {', '.join(missing)}\n"
-            f"\n"
-            f"Please set them in .env file or environment.\n"
-            f"See .env.example for template.\n"
-            f"\n"
-            f"Example .env content:\n"
-            f"{prefix}_SERVER=localhost\n"
-            f"{prefix}_NAME=mydatabase\n"
-            f"{prefix}_USER=myuser\n"
-            f"{prefix}_PASSWORD=SecurePassword123!\n"
-        )
-    
-    # Validate no placeholders
-    for var_name, value in [
-        (f'{prefix}_SERVER', server),
-        (f'{prefix}_NAME', database),
-        (f'{prefix}_USER', user),
-    ]:
-        validate_no_placeholders(value, var_name)
-    
-    # Warn about empty password (might be intentional for Windows Auth)
-    if not password:
-        logger.warning(
-            f"⚠️  {prefix}_PASSWORD is empty. "
-            f"If using Windows Authentication, this is expected. "
-            f"Otherwise, please set a password."
-        )
-    
-    # URL-encode username and password to handle special characters
-    user_encoded = quote_plus(user)
-    password_encoded = quote_plus(password)
-    driver_encoded = quote_plus(driver)
-    
-    # Build connection string
-    conn_str = (
-        f"mssql+pyodbc://{user_encoded}:{password_encoded}"
-        f"@{server}:{port}/{database}"
-        f"?driver={driver_encoded}"
-    )
-    
-    logger.debug(f"Built connection string from {prefix}_* environment variables")
-    return conn_str
-
-
-def get_table_name(prefix: str = 'DB', default: str = 'IceAssets') -> str:
-    """
-    Get database table name from environment or use default.
-    
-    Args:
-        prefix: Environment variable prefix
-        default: Default table name
-    
-    Returns:
-        Table name
-    """
-    return os.getenv(f'{prefix}_TABLE_NAME', default)
-
-
-def get_api_config() -> dict:
-    """
-    Get API configuration from environment variables.
-    
-    Returns:
-        Dictionary with API configuration
-    """
-    return {
-        'timeout': int(os.getenv('API_TIMEOUT', '30')),
-        'max_retries': int(os.getenv('API_MAX_RETRIES', '3')),
-        'page_size': int(os.getenv('API_PAGE_SIZE', '1000')),
-    }
-
-
-def get_log_config() -> dict:
-    """
-    Get logging configuration from environment variables.
-    
-    Returns:
-        Dictionary with logging configuration
-    """
-    level_str = os.getenv('LOG_LEVEL', 'INFO').upper()
-    levels = {
-        'DEBUG': logging.DEBUG,
-        'INFO': logging.INFO,
-        'WARNING': logging.WARNING,
-        'ERROR': logging.ERROR,
-        'CRITICAL': logging.CRITICAL
-    }
-    
-    return {
-        'level': levels.get(level_str, logging.INFO),
-        'directory': os.getenv('LOG_DIR', 'logs'),
-    }
-
-
-def print_config_status() -> None:
-    """
-    Print configuration status (with passwords masked) for debugging.
-    
-    Useful for troubleshooting configuration issues.
-    """
-    print("\n" + "="*60)
-    print("Configuration Status")
-    print("="*60)
-    
-    # Check .env file
-    env_exists = os.path.exists('.env')
-    print(f"\n.env file: {'✓ Found' if env_exists else '✗ Not found'}")
-    
-    if not env_exists:
-        print("  → Copy .env.example to .env and configure")
-    
-    # Check DB config
-    print("\nDatabase Configuration:")
-    db_vars = ['DB_SERVER', 'DB_NAME', 'DB_USER', 'DB_PASSWORD']
-    for var in db_vars:
-        value = os.getenv(var)
-        if value:
-            if 'PASSWORD' in var:
-                print(f"  {var}: {'*' * min(len(value), 8)}")
-            else:
-                print(f"  {var}: {value}")
+    def get_connection_string(self) -> str:
+        """
+        Build SQLAlchemy connection string.
+        
+        Returns:
+            Connection string compatible with SQLAlchemy 2.0
+        """
+        driver_encoded = quote_plus(self.driver)
+        
+        if self.trusted_connection:
+            # Windows Authentication
+            conn_str = (
+                f"mssql+pyodbc://@{self.server}:{self.port}/{self.database}"
+                f"?driver={driver_encoded}"
+                f"&trusted_connection=yes"
+            )
+            logger.debug("Using Windows trusted connection")
         else:
-            print(f"  {var}: ✗ Not set")
+            # SQL Server Authentication
+            user_encoded = quote_plus(self.user)
+            password_encoded = quote_plus(self.password)
+            
+            conn_str = (
+                f"mssql+pyodbc://{user_encoded}:{password_encoded}"
+                f"@{self.server}:{self.port}/{self.database}"
+                f"?driver={driver_encoded}"
+            )
+            logger.debug(f"Using SQL authentication for user: {self.user}")
+        
+        return conn_str
     
-    # Check API config
-    print("\nAPI Configuration:")
-    api_config = get_api_config()
-    for key, value in api_config.items():
-        print(f"  {key}: {value}")
+    @classmethod
+    def from_env(cls, prefix: str = 'DB') -> 'DatabaseConfig':
+        """
+        Create DatabaseConfig from environment variables.
+        
+        Args:
+            prefix: Environment variable prefix (e.g., 'DB' or 'ICE_DB')
+        
+        Returns:
+            DatabaseConfig instance
+        
+        Environment Variables:
+            {PREFIX}_SERVER: Database server hostname  
+            {PREFIX}_NAME: Database name
+            {PREFIX}_USER: Database username (not required if trusted_connection=yes)
+            {PREFIX}_PASSWORD: Database password (not required if trusted_connection=yes)
+            {PREFIX}_DRIVER: ODBC driver (default: 'ODBC Driver 17 for SQL Server')
+            {PREFIX}_PORT: Database port (default: 1433)
+            {PREFIX}_TRUSTED_CONNECTION: Use Windows auth (yes/true/1)
+            {PREFIX}_TABLE_NAME: Target table name (default: 'scraped')
+            {PREFIX}_CONNECTION_TIMEOUT: Connection timeout seconds (default: 30)
+        """
+        server = os.getenv(f'{prefix}_SERVER')
+        database = os.getenv(f'{prefix}_NAME')
+        
+        if not server or not database:
+            raise ValueError(
+                f"❌ Missing required environment variables: "
+                f"{prefix}_SERVER and {prefix}_NAME\n"
+                f"Please set them in .env file or environment.\n"
+                f"See .env.example for template."
+            )
+        
+        # Check if trusted connection is enabled
+        trusted_conn_str = os.getenv(f'{prefix}_TRUSTED_CONNECTION', 'no').lower()
+        trusted_connection = trusted_conn_str in ('yes', 'true', '1')
+        
+        # Get credentials (only required if not using trusted connection)
+        user = os.getenv(f'{prefix}_USER')
+        password = os.getenv(f'{prefix}_PASSWORD')
+        
+        return cls(
+            server=server,
+            database=database,
+            driver=os.getenv(f'{prefix}_DRIVER', 'ODBC Driver 17 for SQL Server'),
+            port=int(os.getenv(f'{prefix}_PORT', '1433')),
+            user=user,
+            password=password,
+            trusted_connection=trusted_connection,
+            table_name=os.getenv(f'{prefix}_TABLE_NAME', 'scraped'),
+            connection_timeout=int(os.getenv(f'{prefix}_CONNECTION_TIMEOUT', '30'))
+        )
+
+
+@dataclass
+class ScraperConfig:
+    """Web scraper configuration."""
+    firefox_binary_path: str
+    geckodriver_path: str
+    url: str = 'https://ice.ir/'
+    page_load_timeout: int = 30
+    implicit_wait: int = 10
+    explicit_wait: int = 15
+    headless: bool = True
     
-    # Check Log config
-    print("\nLogging Configuration:")
-    log_config = get_log_config()
-    print(f"  level: {logging.getLevelName(log_config['level'])}")
-    print(f"  directory: {log_config['directory']}")
+    def __post_init__(self):
+        """Validate paths after initialization."""
+        if not Path(self.firefox_binary_path).exists():
+            raise FileNotFoundError(
+                f"Firefox binary not found: {self.firefox_binary_path}"
+            )
+        
+        if not Path(self.geckodriver_path).exists():
+            raise FileNotFoundError(
+                f"Geckodriver not found: {self.geckodriver_path}"
+            )
     
-    print("\n" + "="*60 + "\n")
+    @classmethod
+    def from_env(cls) -> 'ScraperConfig':
+        """
+        Create ScraperConfig from environment variables.
+        
+        Returns:
+            ScraperConfig instance
+        
+        Environment Variables:
+            FIREFOX_BINARY_PATH: Path to Firefox executable
+            GECKODRIVER_PATH: Path to geckodriver executable
+            ICE_URL: Target URL (default: https://ice.ir/)
+            PAGE_LOAD_TIMEOUT: Page load timeout seconds (default: 30)
+            IMPLICIT_WAIT: Implicit wait seconds (default: 10)
+            EXPLICIT_WAIT: Explicit wait seconds (default: 15)
+            HEADLESS: Run in headless mode (default: true)
+        """
+        firefox_path = os.getenv('FIREFOX_BINARY_PATH')
+        geckodriver_path = os.getenv('GECKODRIVER_PATH')
+        
+        if not firefox_path or not geckodriver_path:
+            raise ValueError(
+                "❌ Missing required environment variables: "
+                "FIREFOX_BINARY_PATH and GECKODRIVER_PATH\n"
+                "Please set them in .env file."
+            )
+        
+        validate_no_placeholders(firefox_path, 'FIREFOX_BINARY_PATH')
+        validate_no_placeholders(geckodriver_path, 'GECKODRIVER_PATH')
+        
+        headless_str = os.getenv('HEADLESS', 'true').lower()
+        
+        return cls(
+            firefox_binary_path=firefox_path,
+            geckodriver_path=geckodriver_path,
+            url=os.getenv('ICE_URL', 'https://ice.ir/'),
+            page_load_timeout=int(os.getenv('PAGE_LOAD_TIMEOUT', '30')),
+            implicit_wait=int(os.getenv('IMPLICIT_WAIT', '10')),
+            explicit_wait=int(os.getenv('EXPLICIT_WAIT', '15')),
+            headless=headless_str in ('yes', 'true', '1')
+        )
+
+
+@dataclass
+class LogConfig:
+    """Logging configuration."""
+    level: int = logging.INFO
+    directory: str = 'logs'
+    format_detailed: str = '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s'
+    format_simple: str = '%(asctime)s - %(levelname)s - %(message)s'
+    
+    @classmethod
+    def from_env(cls) -> 'LogConfig':
+        """
+        Create LogConfig from environment variables.
+        
+        Returns:
+            LogConfig instance
+        
+        Environment Variables:
+            LOG_LEVEL: Logging level (DEBUG/INFO/WARNING/ERROR/CRITICAL)
+            LOG_DIR: Log directory path (default: 'logs')
+        """
+        level_str = os.getenv('LOG_LEVEL', 'INFO').upper()
+        levels = {
+            'DEBUG': logging.DEBUG,
+            'INFO': logging.INFO,
+            'WARNING': logging.WARNING,
+            'ERROR': logging.ERROR,
+            'CRITICAL': logging.CRITICAL
+        }
+        
+        return cls(
+            level=levels.get(level_str, logging.INFO),
+            directory=os.getenv('LOG_DIR', 'logs')
+        )
+
+
+@dataclass
+class RetryConfig:
+    """Retry logic configuration."""
+    max_attempts: int = 3
+    wait_exponential_multiplier: int = 1
+    wait_exponential_max: int = 10
+    retry_on_exceptions: tuple = (Exception,)
+    
+    @classmethod
+    def from_env(cls) -> 'RetryConfig':
+        """
+        Create RetryConfig from environment variables.
+        
+        Returns:
+            RetryConfig instance
+        
+        Environment Variables:
+            RETRY_MAX_ATTEMPTS: Maximum retry attempts (default: 3)
+            RETRY_WAIT_MULTIPLIER: Exponential backoff multiplier (default: 1)
+            RETRY_WAIT_MAX: Maximum wait time seconds (default: 10)
+        """
+        return cls(
+            max_attempts=int(os.getenv('RETRY_MAX_ATTEMPTS', '3')),
+            wait_exponential_multiplier=int(os.getenv('RETRY_WAIT_MULTIPLIER', '1')),
+            wait_exponential_max=int(os.getenv('RETRY_WAIT_MAX', '10'))
+        )
+
+
+@dataclass
+class Config:
+    """Main application configuration."""
+    database: DatabaseConfig
+    scraper: ScraperConfig
+    logging: LogConfig
+    retry: RetryConfig
+    
+    @classmethod
+    def from_env(cls, db_prefix: str = 'DB') -> 'Config':
+        """
+        Create Config from environment variables.
+        
+        Args:
+            db_prefix: Database environment variable prefix
+        
+        Returns:
+            Config instance with all sub-configurations
+        """
+        return cls(
+            database=DatabaseConfig.from_env(db_prefix),
+            scraper=ScraperConfig.from_env(),
+            logging=LogConfig.from_env(),
+            retry=RetryConfig.from_env()
+        )
+    
+    def create_engine(self, **kwargs):
+        """
+        Create SQLAlchemy 2.0 engine with proper configuration.
+        
+        Args:
+            **kwargs: Additional arguments to pass to create_engine
+        
+        Returns:
+            SQLAlchemy Engine instance
+        """
+        from sqlalchemy import create_engine
+        
+        engine_kwargs = {
+            'echo': False,
+            'pool_pre_ping': True,
+            'pool_recycle': 3600,
+            'connect_args': {
+                'timeout': self.database.connection_timeout
+            }
+        }
+        engine_kwargs.update(kwargs)
+        
+        return create_engine(
+            self.database.get_connection_string(),
+            **engine_kwargs
+        )
+    
+    def print_status(self) -> None:
+        """Print configuration status for debugging (passwords masked)."""
+        print("\n" + "="*60)
+        print("Configuration Status")
+        print("="*60)
+        
+        # Database config
+        print("\nDatabase Configuration:")
+        print(f"  Server: {self.database.server}:{self.database.port}")
+        print(f"  Database: {self.database.database}")
+        print(f"  Driver: {self.database.driver}")
+        print(f"  Table: {self.database.table_name}")
+        print(f"  Trusted Connection: {'✓ Yes' if self.database.trusted_connection else '✗ No'}")
+        
+        if not self.database.trusted_connection:
+            print(f"  User: {self.database.user}")
+            print(f"  Password: {'*' * 8}")
+        
+        # Scraper config
+        print("\nScraper Configuration:")
+        print(f"  URL: {self.scraper.url}")
+        print(f"  Firefox: {self.scraper.firefox_binary_path}")
+        print(f"  Geckodriver: {self.scraper.geckodriver_path}")
+        print(f"  Headless: {self.scraper.headless}")
+        print(f"  Page Load Timeout: {self.scraper.page_load_timeout}s")
+        
+        # Logging config
+        print("\nLogging Configuration:")
+        print(f"  Level: {logging.getLevelName(self.logging.level)}")
+        print(f"  Directory: {self.logging.directory}")
+        
+        # Retry config
+        print("\nRetry Configuration:")
+        print(f"  Max Attempts: {self.retry.max_attempts}")
+        print(f"  Wait Multiplier: {self.retry.wait_exponential_multiplier}")
+        print(f"  Max Wait: {self.retry.wait_exponential_max}s")
+        
+        print("\n" + "="*60 + "\n")
 
 
 # Auto-load .env file when module is imported
@@ -312,13 +431,14 @@ if __name__ == '__main__':
     print("Testing configuration...\n")
     
     try:
-        print_config_status()
+        config = Config.from_env()
+        config.print_status()
         
-        # Try to build connection string
-        conn_str = get_connection_string()
-        print("✓ Connection string built successfully")
-        print(f"  (length: {len(conn_str)} characters)\n")
+        # Test engine creation
+        engine = config.create_engine()
+        print("✓ SQLAlchemy engine created successfully\n")
+        engine.dispose()
         
-    except ValueError as e:
+    except (ValueError, FileNotFoundError) as e:
         print(f"\n❌ Configuration Error:\n{e}\n")
         exit(1)
